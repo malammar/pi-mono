@@ -160,10 +160,11 @@ type BashRenderState = {
 	interval: NodeJS.Timeout | undefined;
 	/** Persistent elapsed-time Text node updated in-place by the 1-second timer. */
 	elapsedText: Text | undefined;
-	/** Content key used to skip redundant rebuilds in renderResult. */
-	_lastBuildKey: string | undefined;
-	/** Set by the inline render's invalidate() when a theme change clears the cache. */
-	_themeInvalidated: boolean;
+	/** Content fingerprint used to skip redundant rebuilds in renderResult. */
+	lastBuildKey: string | undefined;
+	/** Set by the inline render child's invalidate() on a theme change so
+	 *  renderResult forces a full rebuild despite the content key matching. */
+	themeInvalidated: boolean | undefined;
 };
 
 type BashResultRenderState = {
@@ -192,6 +193,15 @@ function formatBashCall(args: { command?: string; timeout?: number } | undefined
 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
 
+/**
+ * Cheap content fingerprint: length + first/last 32 chars.
+ * Practically collision-free for bash output while avoiding a full string hash.
+ */
+function contentFingerprint(s: string): string {
+	if (s.length <= 64) return s;
+	return `${s.length}:${s.slice(0, 32)}${s.slice(-32)}`;
+}
+
 function rebuildBashResultRenderComponent(
 	component: BashResultRenderComponent,
 	result: {
@@ -202,6 +212,7 @@ function rebuildBashResultRenderComponent(
 	showImages: boolean,
 	startedAt: number | undefined,
 	endedAt: number | undefined,
+	renderState: BashRenderState,
 ): void {
 	const state = component.state;
 	component.clear();
@@ -247,7 +258,7 @@ function rebuildBashResultRenderComponent(
 					state.cachedSkipped = undefined;
 					// Signal to renderResult that a theme change cleared the cache
 					// so it forces a rebuild despite the content key matching.
-					(component.state as unknown as BashRenderState)._themeInvalidated = true;
+					renderState.themeInvalidated = true;
 				},
 			});
 		}
@@ -275,7 +286,6 @@ function rebuildBashResultRenderComponent(
 		const endTime = endedAt ?? Date.now();
 		// Reuse a persistent Text node so the 1-second timer can update it
 		// in-place without triggering a full rebuildBashResultRenderComponent.
-		const renderState = component.state as unknown as BashRenderState;
 		if (!renderState.elapsedText) {
 			renderState.elapsedText = new Text("", 0, 0);
 		}
@@ -436,11 +446,10 @@ export function createBashToolDefinition(
 				// Use requestRender (lightweight) instead of context.invalidate(),
 				// which would trigger a full updateDisplay() rebuild every second.
 				state.interval = setInterval(() => {
-					if (
-						state.elapsedText !== undefined &&
-						state.startedAt !== undefined &&
-						state.endedAt === undefined
-					) {
+					// Guard: command may have completed between clearInterval and this
+					// final queued tick.
+					if (state.endedAt !== undefined) return;
+					if (state.elapsedText !== undefined && state.startedAt !== undefined) {
 						const elapsed = Date.now() - state.startedAt;
 						state.elapsedText.setText(`\n${theme.fg("muted", `Elapsed ${formatDuration(elapsed)}`)}`);
 					}
@@ -456,12 +465,13 @@ export function createBashToolDefinition(
 			}
 			const component =
 				(context.lastComponent as BashResultRenderComponent | undefined) ?? new BashResultRenderComponent();
-			// Build a cheap key covering everything that makes the render stale.
-			// Skip the expensive rebuild+cache-bust when nothing meaningful changed
-			// (e.g. the 100ms onUpdate tick arriving with identical output content).
+			// Build a fingerprint covering everything that makes the render stale.
+			// contentFingerprint() uses length + boundary chars as a cheap proxy —
+			// avoids hashing the full string while being practically collision-free
+			// for bash output. See contentFingerprint() for the trade-off.
 			const currentText = getTextOutput(result as any, context.showImages) ?? "";
-			const rebuildKey = `${currentText.length}:${options.expanded}:${options.isPartial}:${context.isError}`;
-			if (state._lastBuildKey !== rebuildKey || state._themeInvalidated || !context.lastComponent) {
+			const rebuildKey = `${contentFingerprint(currentText)}:${options.expanded}:${options.isPartial}:${context.isError}`;
+			if (state.lastBuildKey !== rebuildKey || state.themeInvalidated || !context.lastComponent) {
 				rebuildBashResultRenderComponent(
 					component,
 					result as any,
@@ -469,10 +479,11 @@ export function createBashToolDefinition(
 					context.showImages,
 					state.startedAt,
 					state.endedAt,
+					state,
 				);
 				component.invalidate();
-				state._lastBuildKey = rebuildKey;
-				state._themeInvalidated = false;
+				state.lastBuildKey = rebuildKey;
+				state.themeInvalidated = false;
 			}
 			return component;
 		},

@@ -50,24 +50,35 @@ export function truncateToVisualLines(
 	// most — to O(selected_lines), which for BASH_PREVIEW_LINES = 5 means we
 	// typically touch ~5 raw lines regardless of total output size.
 	const contentWidth = Math.max(1, width - paddingX * 2);
-	let rowsNeeded = maxVisualLines;
+	let rowsBudget = maxVisualLines;
 	let startIdx = rawLines.length;
 
-	while (startIdx > 0 && rowsNeeded > 0) {
+	while (startIdx > 0 && rowsBudget > 0) {
 		startIdx--;
 		const lineW = visibleWidth(rawLines[startIdx]);
 		const rowsThisLine = lineW === 0 ? 1 : Math.ceil(lineW / contentWidth);
-		rowsNeeded -= Math.min(rowsThisLine, rowsNeeded);
+		// Clamp: a single long raw line can't consume more rows than the budget.
+		rowsBudget -= Math.min(rowsThisLine, rowsBudget);
 	}
 
-	const skippedCount = startIdx;
+	// Count visual rows in the skipped prefix so the "N earlier lines" hint
+	// reports terminal rows rather than raw line count (which under-counts when
+	// lines wrap).
+	let skippedVisualRows = 0;
+	for (let i = 0; i < startIdx; i++) {
+		const lineW = visibleWidth(rawLines[i]);
+		skippedVisualRows += lineW === 0 ? 1 : Math.ceil(lineW / contentWidth);
+	}
+	const skippedCount = skippedVisualRows;
 
 	// Render only the selected tail — cost is now proportional to displayed
 	// lines, not total output size.
 	const tempText = new Text(rawLines.slice(startIdx).join("\n"), paddingX, 0);
 	const visualLines = tempText.render(width);
 
-	// Clamp to maxVisualLines in case wrap estimates were slightly off.
+	// Safety clamp: visibleWidth() estimates can disagree with Text.render()'s
+	// actual wrapping (e.g. when ANSI sequences affect layout), so the rendered
+	// tail can occasionally exceed maxVisualLines.
 	return {
 		visualLines: visualLines.length > maxVisualLines ? visualLines.slice(-maxVisualLines) : visualLines,
 		skippedCount,
