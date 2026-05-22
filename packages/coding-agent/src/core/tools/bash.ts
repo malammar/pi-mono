@@ -158,6 +158,12 @@ type BashRenderState = {
 	startedAt: number | undefined;
 	endedAt: number | undefined;
 	interval: NodeJS.Timeout | undefined;
+	/** Persistent elapsed-time Text node updated in-place by the 1-second timer. */
+	elapsedText: Text | undefined;
+	/** Content key used to skip redundant rebuilds in renderResult. */
+	_lastBuildKey: string | undefined;
+	/** Set by the inline render's invalidate() when a theme change clears the cache. */
+	_themeInvalidated: boolean;
 };
 
 type BashResultRenderState = {
@@ -239,6 +245,9 @@ function rebuildBashResultRenderComponent(
 					state.cachedWidth = undefined;
 					state.cachedLines = undefined;
 					state.cachedSkipped = undefined;
+					// Signal to renderResult that a theme change cleared the cache
+					// so it forces a rebuild despite the content key matching.
+					(component.state as unknown as BashRenderState)._themeInvalidated = true;
 				},
 			});
 		}
@@ -264,7 +273,14 @@ function rebuildBashResultRenderComponent(
 	if (startedAt !== undefined) {
 		const label = options.isPartial ? "Elapsed" : "Took";
 		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
+		// Reuse a persistent Text node so the 1-second timer can update it
+		// in-place without triggering a full rebuildBashResultRenderComponent.
+		const renderState = component.state as unknown as BashRenderState;
+		if (!renderState.elapsedText) {
+			renderState.elapsedText = new Text("", 0, 0);
+		}
+		renderState.elapsedText.setText(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`);
+		component.addChild(renderState.elapsedText);
 	}
 }
 
@@ -417,7 +433,19 @@ export function createBashToolDefinition(
 		renderResult(result, options, _theme, context) {
 			const state = context.state;
 			if (state.startedAt !== undefined && options.isPartial && !state.interval) {
-				state.interval = setInterval(() => context.invalidate(), 1000);
+				// Use requestRender (lightweight) instead of context.invalidate(),
+				// which would trigger a full updateDisplay() rebuild every second.
+				state.interval = setInterval(() => {
+					if (
+						state.elapsedText !== undefined &&
+						state.startedAt !== undefined &&
+						state.endedAt === undefined
+					) {
+						const elapsed = Date.now() - state.startedAt;
+						state.elapsedText.setText(`\n${theme.fg("muted", `Elapsed ${formatDuration(elapsed)}`)}`);
+					}
+					context.requestRender();
+				}, 1000);
 			}
 			if (!options.isPartial || context.isError) {
 				state.endedAt ??= Date.now();
@@ -428,15 +456,24 @@ export function createBashToolDefinition(
 			}
 			const component =
 				(context.lastComponent as BashResultRenderComponent | undefined) ?? new BashResultRenderComponent();
-			rebuildBashResultRenderComponent(
-				component,
-				result as any,
-				options,
-				context.showImages,
-				state.startedAt,
-				state.endedAt,
-			);
-			component.invalidate();
+			// Build a cheap key covering everything that makes the render stale.
+			// Skip the expensive rebuild+cache-bust when nothing meaningful changed
+			// (e.g. the 100ms onUpdate tick arriving with identical output content).
+			const currentText = getTextOutput(result as any, context.showImages) ?? "";
+			const rebuildKey = `${currentText.length}:${options.expanded}:${options.isPartial}:${context.isError}`;
+			if (state._lastBuildKey !== rebuildKey || state._themeInvalidated || !context.lastComponent) {
+				rebuildBashResultRenderComponent(
+					component,
+					result as any,
+					options,
+					context.showImages,
+					state.startedAt,
+					state.endedAt,
+				);
+				component.invalidate();
+				state._lastBuildKey = rebuildKey;
+				state._themeInvalidated = false;
+			}
 			return component;
 		},
 	};

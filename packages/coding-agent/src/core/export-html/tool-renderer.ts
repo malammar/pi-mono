@@ -83,6 +83,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 			args: renderedArgs.get(toolCallId),
 			toolCallId,
 			invalidate: () => {},
+			requestRender: () => {},
 			lastComponent,
 			state: getState(toolCallId),
 			cwd,

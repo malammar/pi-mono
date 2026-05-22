@@ -400,6 +400,10 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	toolCallId: string;
 	/** Invalidate just this tool execution component for redraw. */
 	invalidate: () => void;
+	/** Request a re-render without rebuilding the component tree. Use this
+	 *  instead of invalidate() when only lightweight state (e.g. an elapsed
+	 *  timer text node) has changed and a full updateDisplay() is not needed. */
+	requestRender: () => void;
 	/** Previously returned component for this render slot, if any. */
 	lastComponent: Component | undefined;
 	/** Shared renderer state for this tool row. Initialized by tool-execution.ts. */
